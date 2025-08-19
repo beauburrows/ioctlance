@@ -535,11 +535,46 @@ if __name__ == '__main__':
                         utils.print_info(f'{root}/{f} had been analyzed.')
                         continue
                     globals.basic_info['path'] = f'{root}/{f}'
-                    command = f'timeout {globals.args.total_timeout * 3} python3 {__file__} "{root}/{f}" {" ".join(sys.argv[2:])}'
-                    utils.print_info(f'{command}')
-                    proc = subprocess.Popen([command], shell=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, encoding='utf8')
-                    proc.wait()
+                    
+                    # Reconstruct arguments excluding the path argument
+                    args_list = []
+                    if globals.args.ioctlcode != 0:
+                        args_list.extend(['-i', str(globals.args.ioctlcode)])
+                    if globals.args.total_timeout != 1200:
+                        args_list.extend(['-T', str(globals.args.total_timeout)])
+                    if globals.args.timeout != 40:
+                        args_list.extend(['-t', str(globals.args.timeout)])
+                    if globals.args.length != 0:
+                        args_list.extend(['-l', str(globals.args.length)])
+                    if globals.args.bound != 0:
+                        args_list.extend(['-b', str(globals.args.bound)])
+                    if globals.args.global_var != '0':
+                        args_list.extend(['-g', globals.args.global_var])
+                    if globals.args.address != 0:
+                        args_list.extend(['-a', str(globals.args.address)])
+                    if globals.args.exclude != '':
+                        args_list.extend(['-e', globals.args.exclude])
+                    if globals.args.overwrite:
+                        args_list.append('-o')
+                    if globals.args.recursion:
+                        args_list.append('-r')
+                    if globals.args.complete:
+                        args_list.append('-c')
+                    if globals.args.debug:
+                        args_list.append('-d')
+                    
+                    args_str = ' '.join(args_list)
+                    command = f'timeout {globals.args.total_timeout} python3 {__file__} "{root}/{f}" {args_str}'
+                    utils.print_info(f'Starting analysis: {root}/{f}')
+                    utils.print_info(f'Command: {command}')
+                    proc = subprocess.Popen([command], shell=True, encoding='utf8')
+                    exit_code = proc.wait()
+                    if exit_code == 0:
+                        utils.print_info(f'Completed successfully: {root}/{f}')
+                    elif exit_code == 124:
+                        utils.print_error(f'Timeout after {globals.args.total_timeout}s: {root}/{f}')
+                    else:
+                        utils.print_error(f'Failed with exit code {exit_code}: {root}/{f}')
     elif os.path.isfile(globals.args.path):
         # Analyze the driver file if it is not analyzed before or overwrite specified.
         if not os.path.isfile(f'{globals.args.path}.json') or globals.args.overwrite:
