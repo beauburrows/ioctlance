@@ -22,6 +22,7 @@ import logging
 import os
 from io import StringIO
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from angr.exploration_techniques.director import ExecuteAddressGoal
 import logging.config
@@ -347,6 +348,61 @@ def find_targets(driver_path):
             utils.print_debug(f'{line}')
 
 
+def analyze_single_file(file_info):
+    """Worker function for parallel analysis of a single driver file."""
+    root, filename = file_info
+    file_path = f'{root}/{filename}'
+    
+    # Check if already analyzed
+    if os.path.isfile(f'{file_path}.json') and not globals.args.overwrite:
+        utils.print_info(f'{file_path} had been analyzed.')
+        return f'{file_path}', 'skipped', 0
+    
+    # Reconstruct arguments excluding the path argument
+    args_list = []
+    if globals.args.ioctlcode != 0:
+        args_list.extend(['-i', str(globals.args.ioctlcode)])
+    if globals.args.total_timeout != 1200:
+        args_list.extend(['-T', str(globals.args.total_timeout)])
+    if globals.args.timeout != 40:
+        args_list.extend(['-t', str(globals.args.timeout)])
+    if globals.args.length != 0:
+        args_list.extend(['-l', str(globals.args.length)])
+    if globals.args.bound != 0:
+        args_list.extend(['-b', str(globals.args.bound)])
+    if globals.args.global_var != '0':
+        args_list.extend(['-g', globals.args.global_var])
+    if globals.args.address != 0:
+        args_list.extend(['-a', str(globals.args.address)])
+    if globals.args.exclude != '':
+        args_list.extend(['-e', globals.args.exclude])
+    if globals.args.overwrite:
+        args_list.append('-o')
+    if globals.args.recursion:
+        args_list.append('-r')
+    if globals.args.complete:
+        args_list.append('-c')
+    if globals.args.debug:
+        args_list.append('-d')
+    
+    args_str = ' '.join(args_list)
+    command = f'timeout {globals.args.total_timeout} python3 {__file__} "{file_path}" {args_str}'
+    
+    utils.print_info(f'Starting analysis: {file_path}')
+    proc = subprocess.Popen([command], shell=True, encoding='utf8')
+    exit_code = proc.wait()
+    
+    if exit_code == 0:
+        utils.print_info(f'Completed successfully: {file_path}')
+        return file_path, 'success', exit_code
+    elif exit_code == 124:
+        utils.print_error(f'Timeout after {globals.args.total_timeout}s: {file_path}')
+        return file_path, 'timeout', exit_code
+    else:
+        utils.print_error(f'Failed with exit code {exit_code}: {file_path}')
+        return file_path, 'failed', exit_code
+
+
 def analyze_driver(driver_path):
     try:
         globals.proj = angr.Project(driver_path, auto_load_libs=False)
@@ -518,63 +574,74 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--recursion', default=False, action='store_true', help='do not kill state if detecting recursion (default False)')
     parser.add_argument('-c', '--complete', default=False, action='store_true', help='get complete base state (default False)')
     parser.add_argument('-d', '--debug', default=False, action='store_true', help='print debug info while analyzing (default False)')
+    parser.add_argument('-j', '--jobs', type=int, default=1, help='number of parallel jobs for directory analysis (default 1, recommended 4 with --cpus="4")')
     parser.add_argument('path', type=str, help='dir (including subdirectory) or file path to the driver(s) to analyze')
     globals.args = parser.parse_args()
 
     if os.path.isdir(globals.args.path):
         # If a directory given, analyze all the drivers in the directory.
+        file_list = []
         walks = [{'root': root, 'dirs': dirs, 'files': files} for root, dirs, files in os.walk(globals.args.path)]
+        
+        # Collect all driver files to analyze
         for walk in walks:
             root = walk['root']
             if root[-1] == '/':
                 root = root[:-1]
-
+            
             for f in walk['files']:
                 if f.lower().endswith('.sys') or f.lower().endswith('.dll'):
-                    if os.path.isfile(f'{root}/{f}.json') and not globals.args.overwrite:
-                        utils.print_info(f'{root}/{f} had been analyzed.')
-                        continue
-                    globals.basic_info['path'] = f'{root}/{f}'
+                    file_list.append((root, f))
+        
+        utils.print_info(f'Found {len(file_list)} driver files to analyze')
+        
+        if globals.args.jobs == 1:
+            # Sequential analysis (original behavior)
+            for file_info in file_list:
+                result = analyze_single_file(file_info)
+        else:
+            # Parallel analysis
+            utils.print_info(f'Starting parallel analysis with {globals.args.jobs} workers')
+            
+            with ThreadPoolExecutor(max_workers=globals.args.jobs) as executor:
+                # Submit all jobs
+                future_to_file = {executor.submit(analyze_single_file, file_info): file_info for file_info in file_list}
+                
+                # Track results
+                completed = 0
+                success_count = 0
+                timeout_count = 0
+                failed_count = 0
+                skipped_count = 0
+                
+                # Process completed futures as they finish
+                for future in as_completed(future_to_file):
+                    file_info = future_to_file[future]
+                    completed += 1
                     
-                    # Reconstruct arguments excluding the path argument
-                    args_list = []
-                    if globals.args.ioctlcode != 0:
-                        args_list.extend(['-i', str(globals.args.ioctlcode)])
-                    if globals.args.total_timeout != 1200:
-                        args_list.extend(['-T', str(globals.args.total_timeout)])
-                    if globals.args.timeout != 40:
-                        args_list.extend(['-t', str(globals.args.timeout)])
-                    if globals.args.length != 0:
-                        args_list.extend(['-l', str(globals.args.length)])
-                    if globals.args.bound != 0:
-                        args_list.extend(['-b', str(globals.args.bound)])
-                    if globals.args.global_var != '0':
-                        args_list.extend(['-g', globals.args.global_var])
-                    if globals.args.address != 0:
-                        args_list.extend(['-a', str(globals.args.address)])
-                    if globals.args.exclude != '':
-                        args_list.extend(['-e', globals.args.exclude])
-                    if globals.args.overwrite:
-                        args_list.append('-o')
-                    if globals.args.recursion:
-                        args_list.append('-r')
-                    if globals.args.complete:
-                        args_list.append('-c')
-                    if globals.args.debug:
-                        args_list.append('-d')
-                    
-                    args_str = ' '.join(args_list)
-                    command = f'timeout {globals.args.total_timeout} python3 {__file__} "{root}/{f}" {args_str}'
-                    utils.print_info(f'Starting analysis: {root}/{f}')
-                    utils.print_info(f'Command: {command}')
-                    proc = subprocess.Popen([command], shell=True, encoding='utf8')
-                    exit_code = proc.wait()
-                    if exit_code == 0:
-                        utils.print_info(f'Completed successfully: {root}/{f}')
-                    elif exit_code == 124:
-                        utils.print_error(f'Timeout after {globals.args.total_timeout}s: {root}/{f}')
-                    else:
-                        utils.print_error(f'Failed with exit code {exit_code}: {root}/{f}')
+                    try:
+                        file_path, status, exit_code = future.result()
+                        if status == 'success':
+                            success_count += 1
+                        elif status == 'timeout':
+                            timeout_count += 1
+                        elif status == 'failed':
+                            failed_count += 1
+                        elif status == 'skipped':
+                            skipped_count += 1
+                        
+                        utils.print_info(f'Progress: {completed}/{len(file_list)} completed')
+                    except Exception as exc:
+                        utils.print_error(f'File {file_info} generated an exception: {exc}')
+                        failed_count += 1
+                
+                # Summary
+                utils.print_info(f'Parallel analysis completed:')
+                utils.print_info(f'  Total: {len(file_list)}')
+                utils.print_info(f'  Success: {success_count}')
+                utils.print_info(f'  Timeout: {timeout_count}')
+                utils.print_info(f'  Failed: {failed_count}')
+                utils.print_info(f'  Skipped: {skipped_count}')
     elif os.path.isfile(globals.args.path):
         # Analyze the driver file if it is not analyzed before or overwrite specified.
         if not os.path.isfile(f'{globals.args.path}.json') or globals.args.overwrite:

@@ -30,11 +30,18 @@ Presented at [CODE BLUE 2023](https://codeblue.jp/2023/en/), this project titled
 
 
 ## Build
-### Docker (Recommand)
+### Docker (Recommended)
 ```
 docker build .
 docker run -it <IOCTLance IMAGE ID> bash
 ```
+
+#### For Parallel Analysis (Recommended)
+For optimal performance with parallel analysis, allocate additional resources:
+```
+docker run --cpus="4" --memory="8g" -it <IOCTLance IMAGE ID> bash
+```
+This provides 4 CPU cores and 8GB RAM, enabling efficient parallel analysis with `-j 4`.
 
 ### Local
 ```
@@ -53,7 +60,7 @@ pip install angr==9.2.18 ipython==8.5.0 ipdb==0.13.9
 ```
 # python3 analysis/ioctlance.py -h
 usage: ioctlance.py [-h] [-i IOCTLCODE] [-T TOTAL_TIMEOUT] [-t TIMEOUT] [-l LENGTH] [-b BOUND]
-                    [-g GLOBAL_VAR] [-a ADDRESS] [-e EXCLUDE] [-o] [-r] [-c] [-d]
+                    [-g GLOBAL_VAR] [-a ADDRESS] [-e EXCLUDE] [-o] [-r] [-c] [-d] [-j JOBS]
                     path
 
 positional arguments:
@@ -83,6 +90,17 @@ optional arguments:
   -r, --recursion       do not kill state if detecting recursion (default False)
   -c, --complete        get complete base state (default False)
   -d, --debug           print debug info while analyzing (default False)
+  -j JOBS, --jobs JOBS  number of parallel jobs for directory analysis (default 1, recommended 4 with --cpus="4")
+```
+
+### Example: Parallel Directory Analysis
+```bash
+# Analyze all drivers in a directory with 4 parallel jobs
+python3 analysis/ioctlance.py -j 4 /path/to/drivers/
+
+# Run with Docker using 4 cores and 8GB RAM
+docker run --cpus="4" --memory="8g" -it <image> bash
+python3 analysis/ioctlance.py -j 4 dataset/
 ```
 
 
