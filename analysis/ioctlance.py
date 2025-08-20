@@ -642,7 +642,7 @@ if __name__ == '__main__':
                     result = analyze_single_file(file_info)
             except KeyboardInterrupt:
                 utils.print_info("Analysis interrupted by user")
-                return
+                sys.exit(1)
         else:
             # Parallel analysis
             utils.print_info(f'Starting parallel analysis with {globals.args.jobs} workers')
@@ -690,7 +690,7 @@ if __name__ == '__main__':
             except KeyboardInterrupt:
                 utils.print_info("Parallel analysis interrupted by user")
                 # Signal handler will clean up active processes
-                return
+                sys.exit(1)
     elif os.path.isfile(globals.args.path):
         # Analyze the driver file if it is not analyzed before or overwrite specified.
         if not os.path.isfile(f'{globals.args.path}.json') or globals.args.overwrite:
