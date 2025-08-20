@@ -20,6 +20,8 @@ import subprocess
 import re
 import logging
 import os
+import signal
+import threading
 from io import StringIO
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +34,31 @@ logging.config.dictConfig({
     'disable_existing_loggers': True,
 })
 reload(logging)
+
+# Global process tracking for graceful shutdown
+active_processes = set()
+process_lock = threading.Lock()
+
+def signal_handler(signum, frame):
+    """Handle SIGINT (Ctrl+C) by terminating all active processes"""
+    utils.print_info("Received interrupt signal, terminating all processes...")
+    
+    with process_lock:
+        processes_to_kill = active_processes.copy()
+    
+    for proc in processes_to_kill:
+        try:
+            if proc.poll() is None:  # Process is still running
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)  # Wait up to 5 seconds for graceful termination
+                except subprocess.TimeoutExpired:
+                    proc.kill()  # Force kill if it doesn't terminate gracefully
+        except Exception as e:
+            utils.print_error(f"Error terminating process: {e}")
+    
+    utils.print_info("All processes terminated. Exiting...")
+    os._exit(1)
 
 def find_ioctl_handler():
     globals.phase = 1
@@ -389,8 +416,18 @@ def analyze_single_file(file_info):
     command = f'timeout {globals.args.total_timeout} python3 {__file__} "{file_path}" {args_str}'
     
     utils.print_info(f'Starting analysis: {file_path}')
-    proc = subprocess.Popen([command], shell=True, encoding='utf8')
-    exit_code = proc.wait()
+    proc = subprocess.Popen([command], shell=True, encoding='utf8', preexec_fn=os.setpgrp)
+    
+    # Register process for tracking
+    with process_lock:
+        active_processes.add(proc)
+    
+    try:
+        exit_code = proc.wait()
+    finally:
+        # Unregister process when done
+        with process_lock:
+            active_processes.discard(proc)
     
     if exit_code == 0:
         utils.print_info(f'Completed successfully: {file_path}')
@@ -577,6 +614,9 @@ if __name__ == '__main__':
     parser.add_argument('-j', '--jobs', type=int, default=1, help='number of parallel jobs for directory analysis (default 1, recommended 4 with --cpus="4")')
     parser.add_argument('path', type=str, help='dir (including subdirectory) or file path to the driver(s) to analyze')
     globals.args = parser.parse_args()
+    
+    # Register signal handler for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
 
     if os.path.isdir(globals.args.path):
         # If a directory given, analyze all the drivers in the directory.
@@ -597,51 +637,60 @@ if __name__ == '__main__':
         
         if globals.args.jobs == 1:
             # Sequential analysis (original behavior)
-            for file_info in file_list:
-                result = analyze_single_file(file_info)
+            try:
+                for file_info in file_list:
+                    result = analyze_single_file(file_info)
+            except KeyboardInterrupt:
+                utils.print_info("Analysis interrupted by user")
+                return
         else:
             # Parallel analysis
             utils.print_info(f'Starting parallel analysis with {globals.args.jobs} workers')
             
-            with ThreadPoolExecutor(max_workers=globals.args.jobs) as executor:
-                # Submit all jobs
-                future_to_file = {executor.submit(analyze_single_file, file_info): file_info for file_info in file_list}
-                
-                # Track results
-                completed = 0
-                success_count = 0
-                timeout_count = 0
-                failed_count = 0
-                skipped_count = 0
-                
-                # Process completed futures as they finish
-                for future in as_completed(future_to_file):
-                    file_info = future_to_file[future]
-                    completed += 1
+            try:
+                with ThreadPoolExecutor(max_workers=globals.args.jobs) as executor:
+                    # Submit all jobs
+                    future_to_file = {executor.submit(analyze_single_file, file_info): file_info for file_info in file_list}
                     
-                    try:
-                        file_path, status, exit_code = future.result()
-                        if status == 'success':
-                            success_count += 1
-                        elif status == 'timeout':
-                            timeout_count += 1
-                        elif status == 'failed':
-                            failed_count += 1
-                        elif status == 'skipped':
-                            skipped_count += 1
+                    # Track results
+                    completed = 0
+                    success_count = 0
+                    timeout_count = 0
+                    failed_count = 0
+                    skipped_count = 0
+                    
+                    # Process completed futures as they finish
+                    for future in as_completed(future_to_file):
+                        file_info = future_to_file[future]
+                        completed += 1
                         
-                        utils.print_info(f'Progress: {completed}/{len(file_list)} completed')
-                    except Exception as exc:
-                        utils.print_error(f'File {file_info} generated an exception: {exc}')
-                        failed_count += 1
-                
-                # Summary
-                utils.print_info(f'Parallel analysis completed:')
-                utils.print_info(f'  Total: {len(file_list)}')
-                utils.print_info(f'  Success: {success_count}')
-                utils.print_info(f'  Timeout: {timeout_count}')
-                utils.print_info(f'  Failed: {failed_count}')
-                utils.print_info(f'  Skipped: {skipped_count}')
+                        try:
+                            file_path, status, exit_code = future.result()
+                            if status == 'success':
+                                success_count += 1
+                            elif status == 'timeout':
+                                timeout_count += 1
+                            elif status == 'failed':
+                                failed_count += 1
+                            elif status == 'skipped':
+                                skipped_count += 1
+                            
+                            utils.print_info(f'Progress: {completed}/{len(file_list)} completed')
+                        except Exception as exc:
+                            utils.print_error(f'File {file_info} generated an exception: {exc}')
+                            failed_count += 1
+                    
+                    # Summary
+                    utils.print_info(f'Parallel analysis completed:')
+                    utils.print_info(f'  Total: {len(file_list)}')
+                    utils.print_info(f'  Success: {success_count}')
+                    utils.print_info(f'  Timeout: {timeout_count}')
+                    utils.print_info(f'  Failed: {failed_count}')
+                    utils.print_info(f'  Skipped: {skipped_count}')
+            except KeyboardInterrupt:
+                utils.print_info("Parallel analysis interrupted by user")
+                # Signal handler will clean up active processes
+                return
     elif os.path.isfile(globals.args.path):
         # Analyze the driver file if it is not analyzed before or overwrite specified.
         if not os.path.isfile(f'{globals.args.path}.json') or globals.args.overwrite:
